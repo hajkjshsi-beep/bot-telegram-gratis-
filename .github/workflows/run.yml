@@ -9,7 +9,7 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # IZIN MENULIS BALIK KE REPO
     
     steps:
       - uses: actions/checkout@v4
@@ -22,13 +22,8 @@ jobs:
       - name: Install Deps
         run: pip install telethon pandas openpyxl
 
-      - name: Check Raw Data Existence
-        run: |
-          if [ ! -f start_links.csv ]; then
-            echo "ERROR: File start_links.csv tidak ditemukan di root repo!"
-            exit 1
-          fi
-          wc -l start_links.csv
+      - name: List Files for Debugging
+        run: ls -la
 
       - name: Run Script
         env:
@@ -37,19 +32,25 @@ jobs:
           TELETHON_STRING_SESSION: ${{ secrets.TELETHON_STRING_SESSION }}
         run: python bot.py
 
-      - name: Save Results
-        if: always()
+      - name: Save Results & State to Repo
+        if: always() # Tetap jalankan meskipun script error/crash
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           
-          # Tambahkan file hasil dan file pembersih sementara jika ada
-          git add hasil.csv join_state.json daftar_bersih_auto.csv || true
+          # TAMBAHKAN SEMUA FILE PENTING DI SINI
+          # hasil.csv -> Log eksekusi
+          # links_diakses.json -> Daftar link yang sudah dicoba (ANTI-ULANG)
+          # join_state.json -> Hitungan join harian
+          # daftar_bersih_auto.csv -> Data hasil parsing (opsional, bisa dihapus jika tidak perlu)
           
-          # Cek apakah ada perubahan yang siap commit
+          git add hasil.csv links_diakses.json join_state.json || true
+          
+          # Cek apakah ada perubahan nyata sebelum commit
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update results $(date)"
+            git commit -m "Update results & state $(date)"
+            # Force push untuk menghindari konflik jika ada race condition
             git push origin HEAD:${{ github.ref_name }} --force
           fi
