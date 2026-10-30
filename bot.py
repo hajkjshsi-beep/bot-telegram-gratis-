@@ -42,21 +42,21 @@ if not API_ID or not API_HASH or not STRING_SESSION:
     sys.exit(1)
 
 # Nama File Input & Output
-RAW_INPUT_FILE = "start_links.csv"
-CLEANED_INPUT_FILE = "daftar_bersih_auto.csv"
-OUTPUT_CSV = "hasil.csv"
+RAW_INPUT_FILE = "start_links.csv"   # File mentah berantakan
+CLEANED_INPUT_FILE = "daftar_bersih_auto.csv" # Hasil parsing otomatis
+OUTPUT_CSV = "hasil.csv"             # Log progres (Anti-ulang)
 JOIN_STATE_FILE = "join_state.json"
 LINK_STATE_FILE = "links_diakses.json"   # Daftar link yang sudah pernah diakses
 
 # Parameter Operasi
 MAKS_PER_JALAN = 0       # 0 = TANPA BATAS
 ISTIRAHAT = 5
-JEDA_START = 4
-JEDA_ANTAR_BOT = 1
-TIMEOUT_BOT = 30
-JEDA_JOIN = 10
-JOIN_ENABLED = True
-MAKS_JOIN_PER_HARI = 40
+JEDA_START = 8           # Ditingkatkan menjadi 8 detik agar media sempat terkirim
+JEDA_ANTAR_BOT = 2       
+TIMEOUT_BOT = 60         # Perpanjang timeout total per bot
+JEDA_JOIN = 10           
+JOIN_ENABLED = True      
+MAKS_JOIN_PER_HARI = 40  
 
 HEADER = ["bot", "start_code", "status", "links", "hasil_join"]
 LINK_RE = re.compile(r"https?://t\.me/[^\s)>\]\"']+")
@@ -207,33 +207,61 @@ async def baca_balasan(client, entity, sent_id):
 async def proses(client, bot, code):
     entity = await client.get_entity(bot)
     sent_id = await mulai(client, entity, code)
-    await asyncio.sleep(JEDA_START)
-    links, jml, media = await baca_balasan(client, entity, sent_id)
-
-    status = "ada_link" if links else ("balasan_tanpa_link" if jml else "tanpa_balasan")
-    if media:
-        status += f"_media={media}"
+    
+    # Strategi Retry untuk Media Slow Loading
+    max_attempts = 2
+    final_status = "tanpa_balasan"
+    final_links = []
+    final_media = 0
+    
+    for attempt in range(max_attempts):
+        await asyncio.sleep(JEDA_START if attempt == 0 else 5) 
+        
+        links, jml, media = await baca_balasan(client, entity, sent_id)
+        
+        if jml > 0:
+            if links or media:
+                final_status = "ada_link" if links else "balasan_tanpa_link"
+                if media:
+                    final_status += f"_media={media}"
+                final_links = links
+                final_media = media
+                break 
+            else:
+                if attempt == 0:
+                    continue
+                else:
+                    final_status = "balasan_kosong"
+                    final_links = []
+                    final_media = 0
+        else:
+            if attempt == 0:
+                continue
+            else:
+                final_status = "timeout_no_response"
+                final_links = []
+                final_media = 0
 
     hasil_join = []
 
-    if JOIN_ENABLED and links:
+    if JOIN_ENABLED and final_links:
         berhasil = 0
-        for l in links:
+        for l in final_links:
             r = await gabung(client, l)
             hasil_join.append(r)
             if r == "link_mati":
-                break
+                break 
             if r == "gabung_sukses":
                 berhasil += 1
                 await asyncio.sleep(JEDA_JOIN)
-
+        
         if berhasil:
             sent_id_new = await mulai(client, entity, code)
-            await asyncio.sleep(JEDA_START + 2)
+            await asyncio.sleep(JEDA_START)
             _, _, media_new = await baca_balasan(client, entity, sent_id_new)
-            status = f"gabung_lalu_update_media={media_new}"
+            final_status = f"gabung_lalu_update_media={media_new}"
 
-    return status, links, hasil_join
+    return final_status, final_links, hasil_join
 
 
 def siapkan_hasil():
@@ -244,7 +272,7 @@ def siapkan_hasil():
             backup_name = f"hasil_backup_{int(time.time())}.csv"
             os.rename(OUTPUT_CSV, backup_name)
             print(f"Header mismatch. Old result backed up to {backup_name}")
-
+            
     if not os.path.exists(OUTPUT_CSV):
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(HEADER)
@@ -254,7 +282,7 @@ def muat_hasil():
     selesai, mati = set(), set()
     if not os.path.exists(OUTPUT_CSV):
         return selesai, mati
-
+        
     with open(OUTPUT_CSV, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -275,11 +303,11 @@ async def kerjakan_satu(client, bot, code):
         except Berhenti:
             raise
         except FloodWaitError as e:
-            wait_sec = min(int(e.seconds), 60)
+            wait_sec = min(int(e.seconds), 60) 
             print(f"Flood Wait detected. Sleeping {wait_sec}s...")
             await asyncio.sleep(wait_sec)
             if attempt == retries - 1:
-                return "flood_limit_exceeded", [], []
+                 return f"flood_limit_exceeded", [], []
         except YouBlockedUserError:
             return "bot_diblokir_user", [], ["blocked_by_user"]
         except (UsernameNotOccupiedError, UsernameInvalidError, ValueError):
@@ -294,17 +322,17 @@ async def kerjakan_satu(client, bot, code):
 
 async def satu_putaran(client, antrean, bot_mati):
     diproses = 0
-
+    
     with open(OUTPUT_CSV, "a", newline="", encoding="utf-8") as out:
         w = csv.writer(out)
-
+        
         for row in antrean:
             if MAKS_PER_JALAN > 0 and diproses >= MAKS_PER_JALAN:
                 break
-
+                
             bot_raw = row["bot"].strip().lstrip("@")
             code = row["start_code"].strip()
-
+            
             if bot_raw in bot_mati:
                 w.writerow([bot_raw, code, "skipped_dead_bot", "", "dead"])
                 out.flush()
@@ -312,88 +340,83 @@ async def satu_putaran(client, antrean, bot_mati):
                 continue
 
             hasil = await kerjakan_satu(client, bot_raw, code)
-
+            
             if hasil is None:
                 print("Critical Network Failure. Stopping this batch.")
                 break
-
+                
             status, links, hj = hasil
-
+            
             if link_mati(" | ".join(hj)):
                 bot_mati.add(bot_raw)
 
             diproses += 1
             w.writerow([bot_raw, code, status, " ".join(links), " | ".join(hj)])
-            out.flush()
+            out.flush() 
             print(f"[{diproses}] {bot_raw}: {status}")
-
+            
             await asyncio.sleep(JEDA_ANTAR_BOT)
 
 
 # ============================================================
-# PARSER INPUT (CSV biasa / format URL / tanpa newline)
+# PARSER KHUSUS UNTUK FILE BERANTAKAN (NO NEWLINE)
 # ============================================================
 def bersihkan_data_mentah(input_file, output_file):
+    """
+    Membaca file teks padat dan memecahnya berdasarkan pola URL https://t.me/
+    Format input diasumsikan: bot,start_code,url (berulang tanpa newline)
+    """
     if not os.path.exists(input_file):
         print(f"File input {input_file} tidak ditemukan!")
         return False
 
     print(f"Membaca file mentah: {input_file} ...")
-
-    with open(input_file, 'r', encoding='utf-8-sig', errors='ignore') as f:
+    
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
-    unique, valid_rows = set(), []
+    # Strategi: Pecah string utama menjadi bagian-bagian yang dimulai dengan "https://t.me/"
+    marker = "https://t.me/"
+    parts = content.split(marker)
+    
+    unique_entries = set()
+    valid_rows = []
+    
+    # Regex untuk mengekstrak Bot Name dan Code dari fragmen teks
+    pattern = re.compile(r"([A-Za-z0-9_]+)\?start=([A-Za-z0-9_\-=]+)")
+    
+    for part in parts[1:]: # Lewati part pertama yang biasanya header/sampah
+        match = pattern.match(part)
+        if match:
+            bot = match.group(1)
+            code = match.group(2)
+            
+            # Bersihkan trailing comma atau karakter aneh jika ada
+            code = code.rstrip(',').strip()
+            
+            if bot and code:
+                key = f"{bot}|{code}"
+                if key not in unique_entries:
+                    unique_entries.add(key)
+                    valid_rows.append((bot, code))
 
-    def tambah(bot, code):
-        bot = bot.strip().lstrip("@")
-        code = code.strip()
-        if not bot or not code:
-            return
-        if bot.lower() == "bot" and code.lower() == "start_code":
-            return  # header
-        key = f"{bot}|{code}"
-        if key not in unique:
-            unique.add(key)
-            valid_rows.append((bot, code))
-
-    total = 0
-
-    # 1) Format URL: https://t.me/BOT?start=CODE
-    for bot, code in re.findall(r"https://t\.me/([A-Za-z0-9_]+)\?start=([A-Za-z0-9_\-=]+)", content):
-        total += 1
-        tambah(bot, code)
-
-    # 2) Format CSV per baris: bot,start_code
-    if not valid_rows:
-        for line in content.splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2 and re.fullmatch(r"@?[A-Za-z0-9_]{3,}", parts[0]) \
-                    and re.fullmatch(r"[A-Za-z0-9_\-=]+", parts[1]):
-                total += 1
-                tambah(parts[0], parts[1])
-
-    # 3) Fallback: data menyatu tanpa newline (bot berakhiran 'bot', code base64 'Z2V0...')
-    if not valid_rows:
-        pola = re.compile(
-            r"([A-Za-z0-9_]*[Bb][Oo][Tt]),(Z2V0[A-Za-z0-9_\-=]+?)(?=[A-Za-z0-9_]*[Bb][Oo][Tt],Z2V0|\s|,|$)"
-        )
-        for bot, code in pola.findall(content):
-            total += 1
-            tambah(bot, code)
-
-    print(f"Ditemukan {total} total match. Unik & Valid: {len(valid_rows)}")
+    print(f"Ditemukan {len(parts)-1} segment. Unik & Valid: {len(valid_rows)}")
 
     if not valid_rows:
-        print("TIDAK ADA DATA VALID DITEMUKAN. Sampel konten:")
-        print(content[:500])
+        print("TIDAK ADA DATA VALID DITEMUKAN. Coba cek sampel konten:")
+        sample = content[:500] 
+        print("--- SAMPEL KONTEN (500 karakter pertama) ---")
+        print(sample)
+        print("---------------------------------------------")
         return False
 
+    # Tulis ke CSV baru
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["bot", "start_code"])
-        writer.writerows(valid_rows)
-
+        writer.writerow(["bot", "start_code"]) 
+        for row in valid_rows:
+            writer.writerow(row)
+            
     print(f"Data bersih tersimpan di: {output_file}")
     return True
 
