@@ -1,4 +1,4 @@
-name: Run TG Bot
+name: Run TG Bot Auto-Clean
 
 on:
   schedule:
@@ -22,6 +22,14 @@ jobs:
       - name: Install Deps
         run: pip install telethon pandas openpyxl
 
+      - name: Check Raw Data Existence
+        run: |
+          if [ ! -f start_links.csv ]; then
+            echo "ERROR: File start_links.csv tidak ditemukan di root repo!"
+            exit 1
+          fi
+          wc -l start_links.csv
+
       - name: Run Script
         env:
           TELETHON_API_ID: ${{ secrets.TELETHON_API_ID }}
@@ -34,6 +42,14 @@ jobs:
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
-          git add hasil.csv join_state.json || true
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update results $(date)"
-          git push origin HEAD:${{ github.ref_name }} || true
+          
+          # Tambahkan file hasil dan file pembersih sementara jika ada
+          git add hasil.csv join_state.json daftar_bersih_auto.csv || true
+          
+          # Cek apakah ada perubahan yang siap commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update results $(date)"
+            git push origin HEAD:${{ github.ref_name }} --force
+          fi
