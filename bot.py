@@ -286,12 +286,12 @@ async def satu_putaran(client, antrean, bot_mati):
 
 
 # ============================================================
-# FUNGSI PEMBERSIH DATA OTOMATIS (AUTO-CLEANER)
+# FUNGSI PEMBERSIH DATA OTOMATIS (AUTO-CLEANER V2 - ROBUST)
 # ============================================================
 def bersihkan_data_mentah(input_file, output_file):
     """
-    Membaca file mentah (campur aduk URL/Text) dan mengekstrak menjadi CSV rapi.
-    Pola yang dicari: https://t.me/BOTNAME?start=CODE
+    Metode Split-by-Marker untuk menangani file CSV 'rata' (tanpa newline).
+    Mencari pola https://t.me/BOTNAME?start=CODE secara eksplisit.
     """
     if not os.path.exists(input_file):
         print(f"File input {input_file} tidak ditemukan!")
@@ -302,9 +302,12 @@ def bersihkan_data_mentah(input_file, output_file):
     with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
-    # Regex untuk menangkap pola URL Telegram Bot dengan parameter start
-    # Group 1: Username Bot (huruf, angka, underscore)
-    # Group 2: Start Code (semua karakter setelah ?start= sampai tanda &, spasi, kutip, atau akhir string)
+    # Hapus header jika ada di awal (opsional, tapi regex di bawah akan melewatinya karena tidak cocok pola URL)
+    
+    # Regex untuk menangkap pasangan Bot & Code dari URL Telegram
+    # Pola: https://t.me/<GROUP1>?start=<GROUP2>
+    # GROUP1: Username bot (huruf, angka, underscore)
+    # GROUP2: Start code (semua karakter kecuali &, spasi, koma, kutip, atau akhir string)
     pattern = re.compile(r"https://t\.me/([A-Za-z0-9_]+)\?start=([^&\s,\"']+)", re.IGNORECASE)
     
     matches = pattern.findall(content)
@@ -313,12 +316,10 @@ def bersihkan_data_mentah(input_file, output_file):
     valid_rows = []
 
     for bot, code in matches:
-        # Bersihkan whitespace jika ada
         bot = bot.strip()
         code = code.strip()
         
-        # Validasi dasar: Pastikan bot berakhir dengan _bot atau mengandung kata bot
-        # Dan code tidak kosong
+        # Validasi dasar
         if bot and code:
             # Hindari duplikat persis
             key = f"{bot}|{code}"
@@ -326,10 +327,14 @@ def bersihkan_data_mentah(input_file, output_file):
                 unique_entries.add(key)
                 valid_rows.append((bot, code))
 
-    print(f"Ditemukan {len(matches)} potensi entri. Unik & Valid: {len(valid_rows)}")
+    print(f"Ditemukan {len(matches)} total match. Unik & Valid: {len(valid_rows)}")
 
     if not valid_rows:
         print("TIDAK ADA DATA VALID DITEMUKAN. Periksa format file input.")
+        # Debugging: Tampilkan sebagian kecil konten
+        print("--- SAMPEL KONTEN (500 karakter pertama) ---")
+        print(content[:500])
+        print("---------------------------------------------")
         return False
 
     # Tulis ke CSV baru
