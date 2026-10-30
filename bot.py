@@ -42,21 +42,19 @@ if not API_ID or not API_HASH or not STRING_SESSION:
     sys.exit(1)
 
 # Nama File Input & Output
-RAW_INPUT_FILE = "start_links.csv"   # File mentah berantakan
-CLEANED_INPUT_FILE = "daftar_bersih_auto.csv" # Hasil parsing otomatis
-OUTPUT_CSV = "hasil.csv"             # Log progres (Anti-ulang)
+INPUT_CSV = "start_links.csv"   # Langsung baca file bersih Anda
+OUTPUT_CSV = "hasil.csv"
 JOIN_STATE_FILE = "join_state.json"
-LINK_STATE_FILE = "links_diakses.json"   # Daftar link yang sudah pernah diakses
+LINK_STATE_FILE = "links_diakses.json" 
 
 # Parameter Operasi
 MAKS_PER_JALAN = 0       # 0 = TANPA BATAS
-ISTIRAHAT = 5
-JEDA_START = 8           # Ditingkatkan menjadi 8 detik agar media sempat terkirim
-JEDA_ANTAR_BOT = 2       
-TIMEOUT_BOT = 60         # Perpanjang timeout total per bot
-JEDA_JOIN = 10           
+ISTIRAHAT_BATCH = 2      # Istirahat singkat antar batch besar
+JEDA_ANTAR_BOT = 0.5     # Jeda sangat pendek antar bot (akun kuat)
+TIMEOUT_BOT = 60         # Batas total waktu untuk satu bot (termasuk wait)
+JEDA_JOIN = 2            # Jeda setelah join group (bisa dipercepat jika aman)
 JOIN_ENABLED = True      
-MAKS_JOIN_PER_HARI = 40  
+MAKS_JOIN_PER_HARI = 50  # Naikkan sedikit batas harian
 
 HEADER = ["bot", "start_code", "status", "links", "hasil_join"]
 LINK_RE = re.compile(r"https?://t\.me/[^\s)>\]\"']+")
@@ -193,60 +191,64 @@ async def mulai(client, entity, code):
     return sent_id
 
 
-async def baca_balasan(client, entity, sent_id):
-    pesan = [m async for m in client.iter_messages(entity, min_id=sent_id, limit=10)]
-    links = []
-    for m in pesan:
-        for l in ambil_link(m):
-            if l not in links:
-                links.append(l)
-    media = sum(1 for m in pesan if m.media and not m.web_preview)
-    return links, len(pesan), media
+async def smart_wait_reply(client, entity, sent_id, timeout=15):
+    """
+    Menunggu balasan secara dinamis.
+    Cek setiap 0.5 detik apakah ada pesan BARU (ID > sent_id).
+    Return: List of messages found after sent_id.
+    """
+    start_time = time.time()
+    new_msgs = []
+    
+    while time.time() - start_time < timeout:
+        # Ambil pesan terbaru dari chat
+        msgs = await client.get_messages(entity, limit=5)
+        
+        # Filter hanya pesan yang ID-nya lebih besar dari pesan kita kirim
+        filtered = [m for m in msgs if m.id > sent_id]
+        
+        if filtered:
+            # Urutkan berdasarkan ID ascending (terlama dulu)
+            filtered.sort(key=lambda x: x.id)
+            return filtered
+            
+        await asyncio.sleep(0.5) # Cek ulang setengah detik kemudian
+        
+    return [] # Timeout, tidak ada balasan
 
 
 async def proses(client, bot, code):
     entity = await client.get_entity(bot)
     sent_id = await mulai(client, entity, code)
     
-    # Strategi Retry untuk Media Slow Loading
-    max_attempts = 2
-    final_status = "tanpa_balasan"
-    final_links = []
-    final_media = 0
+    # SMART WAIT: Tunggu sampai bot membalas (maks 15 detik)
+    # Ini menggantikan sleep fixed yang boros waktu
+    messages = await smart_wait_reply(client, entity, sent_id, timeout=15)
     
-    for attempt in range(max_attempts):
-        await asyncio.sleep(JEDA_START if attempt == 0 else 5) 
-        
-        links, jml, media = await baca_balasan(client, entity, sent_id)
-        
-        if jml > 0:
-            if links or media:
-                final_status = "ada_link" if links else "balasan_tanpa_link"
-                if media:
-                    final_status += f"_media={media}"
-                final_links = links
-                final_media = media
-                break 
-            else:
-                if attempt == 0:
-                    continue
-                else:
-                    final_status = "balasan_kosong"
-                    final_links = []
-                    final_media = 0
-        else:
-            if attempt == 0:
-                continue
-            else:
-                final_status = "timeout_no_response"
-                final_links = []
-                final_media = 0
+    if not messages:
+        return "timeout_no_response", [], []
 
+    links = []
+    media_count = 0
+    
+    # Ekstrak semua link dan hitung media dari seluruh balasan
+    for m in messages:
+        if m.media and not m.web_preview:
+            media_count += 1
+            
+        for l in ambil_link(m):
+            if l not in links:
+                links.append(l)
+
+    status = "ada_link" if links else ("balasan_tanpa_link" if messages else "tanpa_balasan")
+    if media_count > 0:
+        status += f"_media={media_count}"
+    
     hasil_join = []
 
-    if JOIN_ENABLED and final_links:
+    if JOIN_ENABLED and links:
         berhasil = 0
-        for l in final_links:
+        for l in links:
             r = await gabung(client, l)
             hasil_join.append(r)
             if r == "link_mati":
@@ -256,12 +258,23 @@ async def proses(client, bot, code):
                 await asyncio.sleep(JEDA_JOIN)
         
         if berhasil:
+            # Refresh state setelah join
             sent_id_new = await mulai(client, entity, code)
-            await asyncio.sleep(JEDA_START)
-            _, _, media_new = await baca_balasan(client, entity, sent_id_new)
-            final_status = f"gabung_lalu_update_media={media_new}"
+            msgs_new = await smart_wait_reply(client, entity, sent_id_new, timeout=10)
+            _, _, media_new = await baca_balasan_simple(msgs_new)
+            status = f"gabung_lalu_update_media={media_new}"
 
-    return final_status, final_links, hasil_join
+    return status, links, hasil_join
+
+
+async def baca_balasan_simple(messages):
+    links = []
+    for m in messages:
+        for l in ambil_link(m):
+            if l not in links:
+                links.append(l)
+    media = sum(1 for m in messages if m.media and not m.web_preview)
+    return links, len(messages), media
 
 
 def siapkan_hasil():
@@ -294,7 +307,7 @@ def muat_hasil():
 
 
 async def kerjakan_satu(client, bot, code):
-    retries = 3
+    retries = 2
     for attempt in range(retries):
         try:
             if not client.is_connected():
@@ -314,7 +327,7 @@ async def kerjakan_satu(client, bot, code):
             return "bot_not_found", [], ["invalid_username"]
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
             print(f"Network Error (Attempt {attempt+1}/{retries}): {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
         except Exception as e:
             return f"unexpected_error: {str(e)[:100]}", [], []
     return None
@@ -355,70 +368,8 @@ async def satu_putaran(client, antrean, bot_mati):
             out.flush() 
             print(f"[{diproses}] {bot_raw}: {status}")
             
+            # Jeda super pendek antar bot
             await asyncio.sleep(JEDA_ANTAR_BOT)
-
-
-# ============================================================
-# PARSER KHUSUS UNTUK FILE BERANTAKAN (NO NEWLINE)
-# ============================================================
-def bersihkan_data_mentah(input_file, output_file):
-    """
-    Membaca file teks padat dan memecahnya berdasarkan pola URL https://t.me/
-    Format input diasumsikan: bot,start_code,url (berulang tanpa newline)
-    """
-    if not os.path.exists(input_file):
-        print(f"File input {input_file} tidak ditemukan!")
-        return False
-
-    print(f"Membaca file mentah: {input_file} ...")
-    
-    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-
-    # Strategi: Pecah string utama menjadi bagian-bagian yang dimulai dengan "https://t.me/"
-    marker = "https://t.me/"
-    parts = content.split(marker)
-    
-    unique_entries = set()
-    valid_rows = []
-    
-    # Regex untuk mengekstrak Bot Name dan Code dari fragmen teks
-    pattern = re.compile(r"([A-Za-z0-9_]+)\?start=([A-Za-z0-9_\-=]+)")
-    
-    for part in parts[1:]: # Lewati part pertama yang biasanya header/sampah
-        match = pattern.match(part)
-        if match:
-            bot = match.group(1)
-            code = match.group(2)
-            
-            # Bersihkan trailing comma atau karakter aneh jika ada
-            code = code.rstrip(',').strip()
-            
-            if bot and code:
-                key = f"{bot}|{code}"
-                if key not in unique_entries:
-                    unique_entries.add(key)
-                    valid_rows.append((bot, code))
-
-    print(f"Ditemukan {len(parts)-1} segment. Unik & Valid: {len(valid_rows)}")
-
-    if not valid_rows:
-        print("TIDAK ADA DATA VALID DITEMUKAN. Coba cek sampel konten:")
-        sample = content[:500] 
-        print("--- SAMPEL KONTEN (500 karakter pertama) ---")
-        print(sample)
-        print("---------------------------------------------")
-        return False
-
-    # Tulis ke CSV baru
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["bot", "start_code"]) 
-        for row in valid_rows:
-            writer.writerow(row)
-            
-    print(f"Data bersih tersimpan di: {output_file}")
-    return True
 
 
 async def main():
@@ -426,10 +377,7 @@ async def main():
     print(f"Mode: {'UNLIMITED' if MAKS_PER_JALAN == 0 else f'Max {MAKS_PER_JALAN}'}")
     print(f"Link sudah diakses sebelumnya: {len(LINK_DIAKSES)}")
 
-    if not bersihkan_data_mentah(RAW_INPUT_FILE, CLEANED_INPUT_FILE):
-        print("Gagal membersihkan data. Script berhenti.")
-        return
-
+    # Initialize Client using String Session
     client = TelegramClient(
         StringSession(STRING_SESSION),
         API_ID,
@@ -449,39 +397,59 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.first_name} (@{me.username})")
 
-    with open(CLEANED_INPUT_FILE, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+    # Load Input Data Langsung dari CSV (Karena file sudah bersih)
+    if not os.path.exists(INPUT_CSV):
+        print(f"Input file {INPUT_CSV} not found!")
+        await client.disconnect()
+        sys.exit(1)
 
-    print(f"Loaded {len(rows)} entries from cleaned file.")
+    try:
+        with open(INPUT_CSV, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        print(f"Gagal membaca CSV: {e}")
+        await client.disconnect()
+        sys.exit(1)
+        
+    print(f"Loaded {len(rows)} entries from {INPUT_CSV}")
+
+    if len(rows) == 0:
+        print("File kosong. Tidak ada yang diproses.")
+        await client.disconnect()
+        return
 
     siapkan_hasil()
 
     try:
         while True:
             selesai_set, bot_mati_set = muat_hasil()
-
+            
             antrean = []
             for r in rows:
                 b = r["bot"].strip().lstrip("@")
                 c = r["start_code"].strip()
-                if f"{b}|{c}" not in selesai_set:
+                key = f"{b}|{c}"
+                if key not in selesai_set:
                     antrean.append(r)
-
-            print(f"Status: Total Done: {len(selesai_set)} | Remaining Queue: {len(antrean)} | Dead Bots Known: {len(bot_mati_set)}")
-
+            
+            total_processed = len(selesai_set)
+            remaining = len(antrean)
+            
+            print(f"Status: Total Done: {total_processed} | Remaining Queue: {remaining} | Dead Bots Known: {len(bot_mati_set)}")
+            
             if not antrean:
                 print("All tasks completed successfully.")
                 break
-
+                
             await satu_putaran(client, antrean, bot_mati_set)
-
+            
             if jumlah_join_hari_ini() >= MAKS_JOIN_PER_HARI:
                 print(f"Daily Join Limit ({MAKS_JOIN_PER_HARI}) reached. Pausing further joins.")
                 break
 
-            print(f"Istirahat singkat {ISTIRAHAT}s sebelum cek ulang antrian...")
-            await asyncio.sleep(ISTIRAHAT)
-
+            print(f"Istirahat singkat {ISTIRAHAT_BATCH}s sebelum cek ulang antrian...")
+            await asyncio.sleep(ISTIRAHAT_BATCH)
+            
     except Berhenti as e:
         print(f"\nSTOPPED BY LOGIC: {e}")
     except KeyboardInterrupt:
