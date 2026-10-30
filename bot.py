@@ -43,8 +43,9 @@ if not API_ID or not API_HASH or not STRING_SESSION:
     sys.exit(1)
 
 # Nama File Input & Output
-INPUT_CSV = "start_links.csv"   # LANGSUNG BACA FILE ASLI ANDA
-OUTPUT_CSV = "hasil.csv"
+RAW_INPUT_FILE = "start_links.csv"   # File mentah berantakan
+CLEANED_INPUT_FILE = "daftar_bersih_auto.csv" # Hasil parsing otomatis
+OUTPUT_CSV = "hasil.csv"             # Log progres (Anti-ulang)
 JOIN_STATE_FILE = "join_state.json"
 
 # Parameter Operasi
@@ -284,10 +285,95 @@ async def satu_putaran(client, antrean, bot_mati):
             await asyncio.sleep(JEDA_ANTAR_BOT)
 
 
+# ============================================================
+# PARSER KHUSUS UNTUK FILE BERANTAKAN (NO NEWLINE)
+# ============================================================
+def bersihkan_data_mentah(input_file, output_file):
+    """
+    Membaca file teks padat dan memecahnya berdasarkan pola URL https://t.me/
+    Format input diasumsikan: bot,start_code,url (berulang tanpa newline)
+    """
+    if not os.path.exists(input_file):
+        print(f"File input {input_file} tidak ditemukan!")
+        return False
+
+    print(f"Membaca file mentah: {input_file} ...")
+    
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+
+    # Hapus header jika ada di awal (opsional, tapi regex di bawah akan melewatinya karena tidak cocok pola URL)
+    
+    # Strategi: Pecah string utama menjadi bagian-bagian yang dimulai dengan "https://t.me/"
+    # Kita cari semua posisi kemunculan "https://t.me/"
+    marker = "https://t.me/"
+    parts = content.split(marker)
+    
+    # parts[0] adalah sampah/header sebelum URL pertama
+    # parts[1:] adalah sisa setelah setiap marker
+    
+    unique_entries = set()
+    valid_rows = []
+    
+    # Regex untuk mengekstrak Bot Name dan Code dari fragmen teks
+    # Fragmen biasanya berbentuk: BOTNAME?start=CODE,BOTNEXT,...
+    # Tapi karena kita split by URL, fragmen berikutnya mungkin berisi data record LAIN lagi.
+    # Sebenarnya, struktur file Anda adalah:
+    # bot,start_code,https://t.me/bot?start=codebot,start_code,https://t.me/bot?start=code...
+    # Jadi setelah split, kita dapat:
+    # Part N: "BOTNAME?start=CODE," followed immediately by next record's bot name?
+    # Tidak, lihat sampel: "...start=Z2V0...,Donasipapceweidn_bot,Z2V0..."
+    # Ternyata datanya BERGABUNG LANGSUNG.
+    
+    # Pendekatan Baru: Regex Global Extraction
+    # Pola: ([A-Za-z0-9_]+),([^,\s]+),https://t\.me/\1\?start=\2
+    # Ini mencari triplet: BotName, Code, URL-Yang-Konsisten-Dengan-BotName-Dan-Code
+    
+    pattern = re.compile(r"([A-Za-z0-9_]+),([^,\s]+),https://t\.me/\1\?start=\2")
+    
+    matches = pattern.findall(content)
+    
+    for bot, code in matches:
+        bot = bot.strip()
+        code = code.strip()
+        
+        if bot and code:
+            key = f"{bot}|{code}"
+            if key not in unique_entries:
+                unique_entries.add(key)
+                valid_rows.append((bot, code))
+
+    print(f"Ditemukan {len(matches)} total match. Unik & Valid: {len(valid_rows)}")
+
+    if not valid_rows:
+        print("TIDAK ADA DATA VALID DITEMUKAN. Coba cek sampel konten:")
+        sample = content[:1000] 
+        print("--- SAMPEL KONTEN (1000 karakter pertama) ---")
+        print(sample)
+        print("---------------------------------------------")
+        return False
+
+    # Tulis ke CSV baru
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["bot", "start_code"]) 
+        for row in valid_rows:
+            writer.writerow(row)
+            
+    print(f"Data bersih tersimpan di: {output_file}")
+    return True
+
+
 async def main():
     print(f"Starting Bot Process... Date: {get_today_str()}")
     print(f"Mode: {'UNLIMITED' if MAKS_PER_JALAN == 0 else f'Max {MAKS_PER_JALAN}'}")
     
+    # 1. BERSIHKAN DATA MENTAH SECARA OTOMATIS
+    success_clean = bersihkan_data_mentah(RAW_INPUT_FILE, CLEANED_INPUT_FILE)
+    if not success_clean:
+        print("Gagal membersihkan data. Script berhenti.")
+        return
+
     # Initialize Client using String Session
     client = TelegramClient(
         StringSession(STRING_SESSION), 
@@ -308,26 +394,16 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.first_name} (@{me.username})")
 
-    # Load Input Data Langsung dari CSV
-    if not os.path.exists(INPUT_CSV):
-        print(f"Input file {INPUT_CSV} not found!")
+    # Load Input Data (dari file yang sudah dibersihkan)
+    if not os.path.exists(CLEANED_INPUT_FILE):
+        print(f"Input file {CLEANED_INPUT_FILE} not found!")
         await client.disconnect()
         sys.exit(1)
 
-    try:
-        with open(INPUT_CSV, newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-    except Exception as e:
-        print(f"Gagal membaca CSV: {e}")
-        await client.disconnect()
-        sys.exit(1)
+    with open(CLEANED_INPUT_FILE, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
         
-    print(f"Loaded {len(rows)} entries from {INPUT_CSV}")
-
-    if len(rows) == 0:
-        print("File kosong. Tidak ada yang diproses.")
-        await client.disconnect()
-        return
+    print(f"Loaded {len(rows)} entries from cleaned file.")
 
     siapkan_hasil()
 
