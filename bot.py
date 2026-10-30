@@ -48,14 +48,14 @@ OUTPUT_CSV = "hasil.csv"
 JOIN_STATE_FILE = "join_state.json"
 
 # Parameter Operasi
-MAKS_PER_JALAN = 50       
-ISTIRAHAT = 5             
-JEDA_START = 3            
-JEDA_ANTAR_BOT = 1        
-TIMEOUT_BOT = 30          
-JEDA_JOIN = 10            
+MAKS_PER_JALAN = 0       # 0 ARTINYA TANPA BATAS (Proses semua baris)
+ISTIRAHAT = 5             # Detik istirahat antar batch (jika ada loop luar)
+JEDA_START = 3            # Tunggu balasan bot awal
+JEDA_ANTAR_BOT = 1        # Jeda antar pengiriman pesan
+TIMEOUT_BOT = 30          # Timeout ketat per bot (detik)
+JEDA_JOIN = 10            # Jeda setelah join channel/group
 JOIN_ENABLED = True       
-MAKS_JOIN_PER_HARI = 40   
+MAKS_JOIN_PER_HARI = 40   # Batas aman harian untuk JOIN saja
 
 HEADER = ["bot", "start_code", "status", "links", "hasil_join"]
 LINK_RE = re.compile(r"https?://t\.me/[^\s)>\]\"']+")
@@ -253,7 +253,9 @@ async def satu_putaran(client, antrean, bot_mati):
         w = csv.writer(out)
         
         for row in antrean:
-            if diproses >= MAKS_PER_JALAN:
+            # CEK BATAS: Jika MAKS_PER_JALAN > 0 dan sudah mencapai batas, berhenti.
+            # Jika MAKS_PER_JALAN == 0, lanjut terus tanpa batas.
+            if MAKS_PER_JALAN > 0 and diproses >= MAKS_PER_JALAN:
                 break
                 
             bot_raw = row["bot"].strip().lstrip("@")
@@ -279,13 +281,14 @@ async def satu_putaran(client, antrean, bot_mati):
             diproses += 1
             w.writerow([bot_raw, code, status, " ".join(links), " | ".join(hj)])
             out.flush() 
-            print(f"[{diproses}/{MAKS_PER_JALAN}] {bot_raw}: {status}")
+            print(f"[{diproses}] {bot_raw}: {status}")
             
             await asyncio.sleep(JEDA_ANTAR_BOT)
 
 
 async def main():
     print(f"Starting Bot Process... Date: {get_today_str()}")
+    print(f"Mode: {'UNLIMITED' if MAKS_PER_JALAN == 0 else f'Max {MAKS_PER_JALAN}'}")
     
     # Initialize Client using String Session
     client = TelegramClient(
