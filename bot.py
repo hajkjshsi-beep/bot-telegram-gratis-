@@ -43,15 +43,14 @@ if not API_ID or not API_HASH or not STRING_SESSION:
     sys.exit(1)
 
 # Nama File Input & Output
-RAW_INPUT_FILE = "start_links.csv"   # File mentah dari user
-CLEANED_INPUT_FILE = "daftar_bersih_auto.csv" # Hasil pembersihan otomatis
+INPUT_CSV = "start_links.csv"   # LANGSUNG BACA FILE ASLI ANDA
 OUTPUT_CSV = "hasil.csv"
 JOIN_STATE_FILE = "join_state.json"
 
 # Parameter Operasi
-MAKS_PER_JALAN = 0       # 0 = TANPA BATAS (Proses semua sampai habis/timeout)
+MAKS_PER_JALAN = 0       # 0 = TANPA BATAS
 ISTIRAHAT = 5            
-JEDA_START = 4           # Sedikit lebih lama agar media/balasan lengkap
+JEDA_START = 4           
 JEDA_ANTAR_BOT = 1       
 TIMEOUT_BOT = 30         
 JEDA_JOIN = 10           
@@ -285,79 +284,10 @@ async def satu_putaran(client, antrean, bot_mati):
             await asyncio.sleep(JEDA_ANTAR_BOT)
 
 
-# ============================================================
-# FUNGSI PEMBERSIH DATA OTOMATIS (AUTO-CLEANER V2 - ROBUST)
-# ============================================================
-def bersihkan_data_mentah(input_file, output_file):
-    """
-    Metode Split-by-Marker untuk menangani file CSV 'rata' (tanpa newline).
-    Mencari pola https://t.me/BOTNAME?start=CODE secara eksplisit.
-    """
-    if not os.path.exists(input_file):
-        print(f"File input {input_file} tidak ditemukan!")
-        return False
-
-    print(f"Membaca file mentah: {input_file} ...")
-    
-    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-
-    # Hapus header jika ada di awal (opsional, tapi regex di bawah akan melewatinya karena tidak cocok pola URL)
-    
-    # Regex untuk menangkap pasangan Bot & Code dari URL Telegram
-    # Pola: https://t.me/<GROUP1>?start=<GROUP2>
-    # GROUP1: Username bot (huruf, angka, underscore)
-    # GROUP2: Start code (semua karakter kecuali &, spasi, koma, kutip, atau akhir string)
-    pattern = re.compile(r"https://t\.me/([A-Za-z0-9_]+)\?start=([^&\s,\"']+)", re.IGNORECASE)
-    
-    matches = pattern.findall(content)
-    
-    unique_entries = set()
-    valid_rows = []
-
-    for bot, code in matches:
-        bot = bot.strip()
-        code = code.strip()
-        
-        # Validasi dasar
-        if bot and code:
-            # Hindari duplikat persis
-            key = f"{bot}|{code}"
-            if key not in unique_entries:
-                unique_entries.add(key)
-                valid_rows.append((bot, code))
-
-    print(f"Ditemukan {len(matches)} total match. Unik & Valid: {len(valid_rows)}")
-
-    if not valid_rows:
-        print("TIDAK ADA DATA VALID DITEMUKAN. Periksa format file input.")
-        # Debugging: Tampilkan sebagian kecil konten
-        print("--- SAMPEL KONTEN (500 karakter pertama) ---")
-        print(content[:500])
-        print("---------------------------------------------")
-        return False
-
-    # Tulis ke CSV baru
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["bot", "start_code"]) # Header wajib sesuai kode bot.py
-        for row in valid_rows:
-            writer.writerow(row)
-            
-    print(f"Data bersih tersimpan di: {output_file}")
-    return True
-
-
 async def main():
     print(f"Starting Bot Process... Date: {get_today_str()}")
     print(f"Mode: {'UNLIMITED' if MAKS_PER_JALAN == 0 else f'Max {MAKS_PER_JALAN}'}")
     
-    # 1. BERSIHKAN DATA MENTAH SECARA OTOMATIS
-    success_clean = bersihkan_data_mentah(RAW_INPUT_FILE, CLEANED_INPUT_FILE)
-    if not success_clean:
-        print("Gagal membersihkan data. Script berhenti.")
-        return
-
     # Initialize Client using String Session
     client = TelegramClient(
         StringSession(STRING_SESSION), 
@@ -378,16 +308,26 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.first_name} (@{me.username})")
 
-    # Load Input Data (dari file yang sudah dibersihkan)
-    if not os.path.exists(CLEANED_INPUT_FILE):
-        print(f"Input file {CLEANED_INPUT_FILE} not found!")
+    # Load Input Data Langsung dari CSV
+    if not os.path.exists(INPUT_CSV):
+        print(f"Input file {INPUT_CSV} not found!")
         await client.disconnect()
         sys.exit(1)
 
-    with open(CLEANED_INPUT_FILE, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+    try:
+        with open(INPUT_CSV, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        print(f"Gagal membaca CSV: {e}")
+        await client.disconnect()
+        sys.exit(1)
         
-    print(f"Loaded {len(rows)} entries from cleaned file.")
+    print(f"Loaded {len(rows)} entries from {INPUT_CSV}")
+
+    if len(rows) == 0:
+        print("File kosong. Tidak ada yang diproses.")
+        await client.disconnect()
+        return
 
     siapkan_hasil()
 
